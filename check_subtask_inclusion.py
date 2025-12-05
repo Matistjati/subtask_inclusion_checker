@@ -48,6 +48,10 @@ summary_path = Path("summary.md")
 if summary_path.exists():
     summary_path.unlink()
 
+print("HELLO IM RUNNIONG")
+
+for file in Path(__file__).parent.glob('*'):
+    print(file)
 
 def write_log(*args):
     with log_file.open("a") as f:
