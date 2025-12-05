@@ -124,15 +124,19 @@ def validate_problem(problem: Path):
     data = []
 
     def go(file, g):
-        val = run_validator(infiles_path[file],group_to_flags[g],g)
-        inc = 1 if g in infiles[file] else 0
-        if val == inc:
-            return "OK:Y" if val else "OK:N"
-        elif val:
-            return "MISS"
-        else:
-            run_validator_and_print(infiles_path[file],group_to_flags[g],g)
-            return "BAD"
+        try:
+            val = run_validator(infiles_path[file],group_to_flags[g],g)
+            inc = 1 if g in infiles[file] else 0
+            if val == inc:
+                return "OK:Y" if val else "OK:N"
+            elif val:
+                return "MISS"
+            else:
+                run_validator_and_print(infiles_path[file],group_to_flags[g],g)
+                return "BAD"
+        except Exception as e:
+            write_log(f"Exception while validating {file} for group {g}: {e}")
+            return "UNKNOWN"
 
     for file in inputs:
         #row = [file] + [go(file, g) for g in groups]
@@ -210,10 +214,10 @@ def validate_problem(problem: Path):
     if any_misses:
         num_misses = count_word_occurrences("MISS", removed_sample)
         p_misses = num_misses / (len(removed_sample)*len(groups)) * 100
-        write_pretty_output(f"### ⚠️ MISSES: {num_misses}, {p_misses:.2f}% of all checks.\n")
+        write_pretty_output(f"### Misses: {num_misses}, {p_misses:.2f}% of all checks.\n")
 
     if any_bads:
-        write_pretty_output(f"### ❌ BADS: {count_word_occurrences('BAD', data)}")
+        write_pretty_output(f"### Bads: {count_word_occurrences('BAD', data)}")
 
 
     headers = ['INPUT'] + groups
@@ -234,7 +238,6 @@ if len(sys.argv) > 1:
 else:
     problems = discover_problems(Path(__file__))
 
-print(problems)
 num_problems = len(problems)
 print(f"Will check {num_problems} problems.")
 i=1
