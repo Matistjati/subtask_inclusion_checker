@@ -11,6 +11,8 @@ To add this to your problem repository, simply create the file `.github/workflow
 It will then trigger on every push. Note that this can easily consume lots of compute time. I am not responsible if the script acts up
 and uses a lot of compute. As a safety measure, I have put in a 10 minute timeout.
 
+A standalone, command-line version of the script is also provided in the file `standalone_subtask_inclusion.py`.
+
 Credits to Joakim Blikstad for having the idea for the Python script and writing the first version.
 
 Typical output (can be seen in the summary tab of the action in Github):
