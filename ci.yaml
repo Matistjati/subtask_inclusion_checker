@@ -35,4 +35,4 @@ jobs:
       - name: Check Subtask Inclusions
           # Add a timeout for safety
         run: |
-          timeout 10m python3 -u check_subtask_inclusion.py | tee "$GITHUB_STEP_SUMMARY"
+          timeout 10m python3 -u check_subtask_inclusion.py --target-markdown | tee "$GITHUB_STEP_SUMMARY"
