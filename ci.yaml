@@ -14,7 +14,7 @@ jobs:
       - name: Checkout the subtask_inclusion repo
         uses: actions/checkout@v4
         with:
-          repository: Matistjati/subtask_inclusion_github_action # REPLACE this with your own fork if you don't trust me
+          repository: Matistjati/subtask_inclusion_checker # REPLACE this with your own fork if you don't trust me
           path: subtask_inclusion_repo
 
       - name: Move Python script to root
