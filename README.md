@@ -2,7 +2,7 @@
 
 ## Background
 
-When preparing IOI-style problems in the [Kattis problem package](https://www.kattis.com/problem-package-format/spec/legacy.html),
+When preparing IOI-style problems in the [Kattis problem package format](https://www.kattis.com/problem-package-format/spec/legacy.html),
 it's very common to have subtasks. Each subtask has a set of constraints.
 Sometimes, some subtasks are strict subsets of others.
 For example:
@@ -10,7 +10,7 @@ For example:
 - Group 2: N <= 1000
 
 In this example, every test case that is in group 1 should also be part of group 2.
-Doing this is will henceforth be referred to as a subtask inclusion.
+Copying all test cases from one group to another will henceforth be referred to as a subtask inclusion.
 If you don't include subtasks properly, you might end up with a contestant's solution passing group 2, but not 1, which is obviously wrong.
 This does happen in practice, as you might hand-craft small edgecases and then forget to add them to the larger groups.
 
@@ -23,10 +23,10 @@ If there are big columns of misses, this probably indicates one of these 3 thing
 - Your input validator is not strict enough.
 - The group is missing max-cases.
 
-The easiest way to manage subtask inclusions is using [testdata_tools](https://github.com/Kodsport/testdata_tools) to generate test data,
-which provides the command `include_group`.
+One of the easiest ways to manage subtask inclusions is to use [testdata_tools](https://github.com/Kodsport/testdata_tools) to generate test data,
+which provides the convenient command `include_group`.
 
-Of course, some subtask constraints are impossible to validate, such as "the input is generated uniformly at random",
+Of course, some subtask constraints are impossible to validate, such as "the input was generated uniformly at random",
 in which case you have to live with the false positive.
 
 To use the utility, one options is to run it as a command-line program:
@@ -34,16 +34,18 @@ To use the utility, one options is to run it as a command-line program:
 python3 check_subtask_inclusion.py <directory>
 ```
 
-Which will then run the tool on every problem package in `<directory\`. If you're planning on using this, I would strongly recommend you to use an alias.
+Which will then run the tool on every problem package in `<directory>`.
+If you're planning on using this, I would strongly recommend you to use an alias.
 If you want to export the results, you can use the command-line option `target-markdown` for output that is optimized for Markdown instead of a console.
 
-If you don't want to worry about running manually, you can also install it to run automatically every time you commit to your problem repository.
+If you don't want to worry about remembering to run it manually, you can also install it to run automatically every time you commit to your problem repository.
 To do this, simply create the file `.github/workflows/ci.yaml`, and copy the contents of `ci.yaml` into it.
 It will then trigger on every push.
+With minimal changes, you could make it such that you receive an email every time someone makes a push with missing subtask inclusions.
 
-I also make a big assumption on correctness: no group includes testcases from a group that comes later in Kattis' lexicographic order.
-Note that this assumption does not lose expressivity in general, since if you ever have a cycle of the subset relation, then all groups in the
-cycle are exactly the same and could be merged into a single group.
+I also make a big assumption for correctness: no group includes testcases from a group that comes later in Kattis' lexicographic order.
+Note that this assumption does not lose expressivity in general, since if you ever have a cycle of the subset relation,
+then all groups in the cycle are the same and could be merged into a single group.
 
 ## Disclaimers (PLEASE READ!)
 First, note that if you run this as part of CI, the script can easily consume lots of compute time (on the order of minutes).
@@ -62,9 +64,15 @@ damages resulting from running code in this repository.
 
 Credits to Joakim Blikstad for the idea and writing the first version.
 
-## Sample Outputs
+## Sample Output for Console mode
 
-Typical Markdown output (can be seen in the summary tab of the action in Github):
+Running via command-line:
+
+![Sample view of console output](console.png)
+
+## Sample Output for Markdown mode
+
+This is what you will see in the summary tab of the action in Github.
 
 
 Will check 1 problem.
@@ -163,8 +171,6 @@ Will check 1 problem.
 
 </details>
 
-
-![Sample view of console output](console.png)
 
 # Fragility
 It's not uncommon for input validators to use assert. This can easily lead to the Github runner being overwhelmed by many Apport
