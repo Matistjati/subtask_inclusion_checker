@@ -71,6 +71,10 @@ Will check 1 problem.
 ## Problem 1/1: online/bergfester
 ### ⚠️Misses: 61, 13.03% of all checks.
 
+❌Missed inclusion: sample can be included in
+ - group4
+ - group6
+
 ❌Missed inclusion: group1 can be included in
  - group4
  - group6
@@ -157,8 +161,8 @@ Will check 1 problem.
 | 050-g8-5.in  |  SKIP  |  ✅OK:N  |  ✅OK:N  |  ✅OK:N  |  ⚠️MISS  |  ✅OK:N  |  ✅OK:N  |  ✅OK:N  |  ✅OK:Y  |
 | 051-g8-6.in  |  SKIP  |  ✅OK:N  |  ✅OK:N  |  ✅OK:N  |  ⚠️MISS  |  ✅OK:N  |  ✅OK:N  |  ✅OK:N  |  ✅OK:Y  |
 
-
 </details>
+
 
 ![Sample view of console output](console.png)
 

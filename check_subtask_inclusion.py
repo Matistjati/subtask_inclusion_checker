@@ -141,7 +141,10 @@ def validate_problem(problem: Path):
                 infiles_path[file] = os.path.join(dirpath,file)
     
     for tc, groups in tc_to_groups.items():
-        which_group = min(groups)
+        if "sample" in groups:
+            which_group = "sample"
+        else:
+            which_group = min(groups)
         group_testcases[which_group].append(tc)
 
     inputs = sorted(tc_to_groups.keys())
@@ -270,9 +273,6 @@ def validate_problem(problem: Path):
     for i in range(len(data)):
         tc_index[data[i][0]] = i
     for g1 in groups:
-        if g1 == "sample":
-            continue
-
         missed_inclusions = []
         for g2_ind, g2 in enumerate(groups):
             if g2 == "sample":
