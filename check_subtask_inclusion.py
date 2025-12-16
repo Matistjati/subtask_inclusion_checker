@@ -14,6 +14,7 @@ from typing import Iterable, List, Any
 import argparse
 
 resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
