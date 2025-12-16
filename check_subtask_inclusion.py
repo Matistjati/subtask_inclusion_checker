@@ -2,9 +2,7 @@
 
 # This script will run all testcases towards the validation for all testgroups,
 # and report any potential testcases which could also be included in additional groups.
-# Mostly written by chatgpt...
 
-import sys
 import subprocess
 import os
 import yaml
@@ -12,45 +10,90 @@ import concurrent.futures
 import re
 import resource
 from pathlib import Path
-import shutil
 from typing import Iterable, List, Any
+import argparse
 
 resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 
-out_dir = 'output'
-out_path = Path(__file__).parent / out_dir
-if out_path.exists():
-    shutil.rmtree(out_path)
-out_path.mkdir()
-log_file = Path(out_path / 'test_group_inclusions.log')
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--target-markdown",
+    action="store_true",
+    help="Optimize output formatting for Markdown (otherwise console)"
+)
 
+parser.add_argument(
+    "directory",
+    nargs="?",
+    default=Path("."),
+    type=Path,
+    help="Directory to process (default: current directory)"
+)
 
-summary_path = Path("summary.md")
-if summary_path.exists():
-    summary_path.unlink()
+args = parser.parse_args()
+target_markdown = args.target_markdown
 
-def write_log(*args):
-    with log_file.open("a") as f:
-        f.write(f"{' '.join(args)}\n")
+# Formatting
+OK_STR = "OK"
+SKIP_STR = "SKIP"
+MISS_STR = "MISS"
+BAD_STR = "BAD"
 
-def write_pretty_output(line):
-    with summary_path.open("a") as f:
-        f.write(f"{line}\n")
-    
-    if "GITHUB_STEP_SUMMARY" in os.environ:
-        github_summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-        with github_summary.open("a") as f:
-            f.write(f"{line}\n")
+class Colors:
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    ORANGE = '\033[93m'
+    GRAY = '\033[90m'
+    RESET = '\033[0m'
+
+def orange(text, console_only=False):
+    if target_markdown:
+        if console_only:
+            return text
+        return f"⚠️{text}"
+    return f"{Colors.ORANGE}{text}{Colors.RESET}"
+
+def red(text, console_only=False):
+    if target_markdown:
+        if console_only:
+            return text
+        return f"❌{text}"
+    return f"{Colors.RED}{text}{Colors.RESET}"
+
+def green(text, console_only=False):
+    if target_markdown:
+        if console_only:
+            return text
+        return f"✅{text}"
+    return f"{Colors.GREEN}{text}{Colors.RESET}"
+
+def gray(text, console_only=False):
+    if target_markdown:
+        return text
+    return f"{Colors.GRAY}{text}{Colors.RESET}"
+
+def h2():
+    if target_markdown:
+        return "## "
+    return ""
+
+def h3():
+    if target_markdown:
+        return "### "
+    return ""
+
+def print_md_newline():
+    if target_markdown:
+        print("")
 
 def get_problem_name(problem: Path) -> str:
-    problem_name = problem.name
+    problem_name = green(problem.name, console_only=True)
     parent = problem.parent.name
-    if parent != Path(__file__).parent.name:
+    if parent != Path(__file__).parent.name and parent:
         problem_name = parent + '/' + problem_name
     return problem_name
 
 def validate_problem(problem: Path):
-    write_log(f"Validating problem: {problem}")
     # Name of the C++ source file
     cpp_file = problem / "input_validators/validator/validator.cpp"
     # Name of the output executable
@@ -61,42 +104,28 @@ def validate_problem(problem: Path):
     compile_process = subprocess.run(compile_command, capture_output=True, text=True)
 
     # Check if compilation was successful
-    if compile_process.returncode == 0:
-        write_log("Compilation successful.")
-    else:
-        print(f"## ❌ {get_problem_name(problem)} Validator Compilation Failed \n")
-        write_pretty_output(f"## ❌ {get_problem_name(problem)} Validator Compilation Failed \n")
-        write_log("Compilation failed:")
-        write_log(compile_process.stderr)
+    if compile_process.returncode != 0:
+        print(f"{h2()}{red('Validator Compilation Failed:')}")
+        print(red(compile_process.stderr))
         exit(0)
 
     def run_validator(file, flags, group):
         run_command = [output_executable] + flags.split()
-        write_log("validating", os.path.basename(file), "for", group)
         with open(file) as inp:
             run_process = subprocess.run(run_command, stdin=inp, capture_output=True, text=True)
-            return run_process.returncode == 42
-
-    def run_validator_and_print(file, flags, group):
-        run_command =  [output_executable] + flags.split()
-        write_log("❌ WARNING:", os.path.basename(file), "not in", group)
-        write_log("flags:", flags)
-        with open(file) as inp:
-            run_process = subprocess.run(run_command, stdin=inp, capture_output=True, text=True)
-            write_log("stdout:", run_process.stdout)
-            write_log("stderr:", run_process.stderr)
-            write_log("returncode:", run_process.returncode)
             return run_process.returncode == 42
 
     group_to_flags = {}
-    infiles = {}
+    tc_to_groups = {}
     infiles_path = {}
+    group_testcases = {}
 
     # os.walk generates the file names in a directory tree
     for dirpath, dirnames, filenames in os.walk(os.path.join(problem,'data')):
         group = os.path.basename(dirpath)
         if group not in ("data", "secret"):
             group_to_flags[group] = ""
+            group_testcases[group] = []
         if "testdata.yaml" in filenames:
             with open(os.path.join(dirpath,'testdata.yaml'), 'r') as file:
                 # Load the YAML content
@@ -105,15 +134,17 @@ def validate_problem(problem: Path):
                     group_to_flags[group] = config['input_validator_flags']
         for file in filenames:
             if file.endswith('.in'):
-                if file not in infiles:
-                    infiles[file] = []
-                infiles[file].append(group)
+                if file not in tc_to_groups:
+                    tc_to_groups[file] = []
+
+                tc_to_groups[file].append(group)
                 infiles_path[file] = os.path.join(dirpath,file)
+    
+    for tc, groups in tc_to_groups.items():
+        which_group = min(groups)
+        group_testcases[which_group].append(tc)
 
-    #print(group_to_flags)
-    #print(infiles)
-
-    inputs = sorted(infiles.keys())
+    inputs = sorted(tc_to_groups.keys())
     groups = sorted(group_to_flags.keys())
     if 'sample' in groups:
         groups.remove('sample')
@@ -126,16 +157,15 @@ def validate_problem(problem: Path):
     def go(file, g):
         try:
             val = run_validator(infiles_path[file],group_to_flags[g],g)
-            inc = 1 if g in infiles[file] else 0
+            inc = 1 if g in tc_to_groups[file] else 0
             if val == inc:
-                return "OK:Y" if val else "OK:N"
+                return f"{OK_STR}:Y" if val else f"{OK_STR}:N"
             elif val:
-                return "MISS"
+                return MISS_STR
             else:
-                run_validator_and_print(infiles_path[file],group_to_flags[g],g)
-                return "BAD"
+                return BAD_STR
         except Exception as e:
-            write_log(f"Exception while validating {file} for group {g}: {e}")
+            print(f"{red('Exception while validating')} {file} for group {g}: {e}")
             return "UNKNOWN"
 
     for file in inputs:
@@ -147,11 +177,6 @@ def validate_problem(problem: Path):
 
 
     def print_table(data: Iterable[Iterable[Any]], headers: Iterable[Any]) -> str:
-        """
-        Build a markdown table from `headers` and `data`, print it, and return it as a string.
-        ANSI escape sequences are stripped for sizing and output.
-        """
-
         ncols = max(len(headers), max((len(r) for r in data), default=0))
 
         col_widths: List[int] = []
@@ -160,29 +185,56 @@ def validate_problem(problem: Path):
             for r in data:
                 max_width = max(max_width, len(r[col]))
             col_widths.append(max(3, max_width))
+        col_widths[0] = max(col_widths[0], max(len(g) for g in groups))
 
-        def pad(text: str, width: int) -> str:
-            return text + ' ' * (width - len(text))
+        def pad(text: str, width: int, text_width=None) -> str:
+            if not text_width:
+                text_width = len(text)
+            w = (width - text_width)
+            l_half = w//2
+            r_half = w-l_half
+            return ' ' * l_half + text + ' ' * r_half
 
         def color_cell(cell: str) -> str:
-            if "OK" in cell:
-                return f"✅{cell}"
-            elif "MISS" in cell:
-                return f"⚠️{cell}"
-            elif "BAD" in cell:
-                return f"❌{cell}"
+            if OK_STR in cell:
+                return green(cell)
+            elif MISS_STR in cell:
+                return orange(cell)
+            elif BAD_STR in cell:
+                return red(cell)
+            elif SKIP_STR in cell:
+                return gray(cell)
             return cell
 
-        rows_colored = [[color_cell(cell) for cell in row] for row in data]
+        def format_group(group_name, sep='-'):
+            if target_markdown:
+                group_name = pad(f"#{group_name}", col_widths[0])
+            else:
+                group_name = pad(green(group_name, console_only=True), col_widths[0], len(group_name))
+            contents = [group_name] + [pad(sep * col_widths[i], col_widths[i]) for i in range(1, len(col_widths))]
+            line = '| ' + ' | '.join(contents[i] for i in range(len(contents))) + ' |'
+            return line
+
+        row_lines = []
+        if "sample" in groups:
+            row_lines.append(format_group("sample", sep=' '))
+
+        for r in range(len(data)):
+            line = '| ' + ' | '.join(pad(color_cell(data[r][i]), col_widths[i], len(data[r][i])) for i in range(ncols)) + ' |'
+            row_lines.append(line)
+            
+            # Insert group names inbetween
+            if r + 1 < len(data):
+                curr_tc = data[r][0]
+                next_tc = data[r+1][0]
+                if min(tc_to_groups[curr_tc]) != min(tc_to_groups[next_tc]):
+                    group_name = min(tc_to_groups[next_tc])
+                    row_lines.append(format_group(group_name))
 
         header_line = '| ' + ' | '.join(pad(headers[i], col_widths[i]) for i in range(ncols)) + ' |'
         separator_line = '| ' + ' | '.join('-' * col_widths[i] for i in range(ncols)) + ' |'
-        row_lines = [
-            '| ' + ' | '.join(pad(rows_colored[r][i], col_widths[i]) for i in range(ncols)) + ' |'
-            for r in range(len(rows_colored))
-        ]
 
-        lines = [header_line, separator_line] + row_lines
+        lines = [separator_line if not target_markdown else '', header_line, separator_line] + row_lines
         table = '\n'.join(lines)
 
         return table
@@ -195,36 +247,66 @@ def validate_problem(problem: Path):
                     count += 1
         return count
 
-    removed_sample = [row[:] for row in data]
-    any_bads = count_word_occurrences("BAD", data)>0
+    # We really dont care what couldve been put in sample
     if 'sample' in groups:
-        for row in removed_sample:
-            del row[groups.index('sample')+1]
-    any_misses = count_word_occurrences("MISS", removed_sample)>0
+        for row in data:
+            if row[groups.index('sample')+1] == MISS_STR:
+                row[groups.index('sample')+1] = SKIP_STR
 
-    if any_bads:
-        emoji = "❌"
-    elif any_misses:
-        emoji = "⚠️"
-    else:
-        emoji = "✅"
-    
-    write_pretty_output(f"## {emoji} {get_problem_name(problem)}\n")
+    # Warning/bad summary
+    any_bads = count_word_occurrences(BAD_STR, data)>0
+    any_misses = count_word_occurrences(MISS_STR, data)>0
 
     if any_misses:
-        num_misses = count_word_occurrences("MISS", removed_sample)
-        p_misses = num_misses / (len(removed_sample)*len(groups)) * 100
-        write_pretty_output(f"### Misses: {num_misses}, {p_misses:.2f}% of all checks.\n")
+        num_misses = count_word_occurrences(MISS_STR, data)
+        p_misses = num_misses / (len(data)*len(groups)) * 100
+        print(f"{h3()}{orange('Misses')}: {num_misses}, {p_misses:.2f}% of all checks.\n")
 
     if any_bads:
-        write_pretty_output(f"### Bads: {count_word_occurrences('BAD', data)}")
+        print(f"{h3()}{red('Bads')}: {count_word_occurrences('BAD', data)}")
 
+    # Subtask inclusion misses
+    tc_index = {}
+    for i in range(len(data)):
+        tc_index[data[i][0]] = i
+    for g1 in groups:
+        if g1 == "sample":
+            continue
 
+        missed_inclusions = []
+        for g2_ind, g2 in enumerate(groups):
+            if g2 == "sample":
+                continue
+
+            num_misses = 0
+            for tc in group_testcases[g1]:
+                assert len(data[tc_index[tc]]) == len(groups) + 1
+                if data[tc_index[tc]][g2_ind + 1] == MISS_STR:
+                    num_misses += 1
+
+            if num_misses == len(group_testcases[g1]):
+                missed_inclusions.append(g2)
+
+        if not missed_inclusions:
+            continue
+        elif len(missed_inclusions) == 1:
+            print(f"{red('Missed inclusion')}: {orange(g1, console_only=True)} can be included in {orange(missed_inclusions[0], console_only=True)}")
+        else:
+            print(f"{red('Missed inclusion')}: {orange(g1, console_only=True)} can be included in")
+            for g2 in missed_inclusions:
+                print(f" - {orange(g2, console_only=True)}")
+        print_md_newline()
+
+    # Table
+    print("")
     headers = ['INPUT'] + groups
-    write_pretty_output("<details>\n")
-    write_pretty_output(print_table(data,headers))
-    write_pretty_output("</details>\n")
-    
+    if target_markdown:
+        print("<details>\n")
+    print(print_table(data,headers))
+    print_md_newline()
+    if target_markdown:
+        print("</details>\n")
+    print("")
 
 def discover_problems(root: Path):
     if root.is_file():
@@ -233,18 +315,14 @@ def discover_problems(root: Path):
     candidates = [p for p in candidates if "testdata_tools" not in str(p)]
     return candidates
 
-if len(sys.argv) > 1:
-    problems = discover_problems(Path(sys.argv[1]))
-else:
-    problems = discover_problems(Path(__file__))
+directory = args.directory
+problems = discover_problems(directory)
 
 num_problems = len(problems)
-print(f"Will check {num_problems} problems.")
+plural = '' if num_problems == 1 else 's'
+print(f"Will check {num_problems} problem{plural}.")
 i=1
 for problem in problems:
-    print(f"Checking problem {i}/{num_problems}: {get_problem_name(problem)}")
+    print(f"{h2()}Problem {i}/{num_problems}: {get_problem_name(problem)}")
     validate_problem(problem)
     i += 1
-
-write_pretty_output("# NOTE:")
-write_pretty_output("We don't count sample \"misses\" in most statistics")

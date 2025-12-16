@@ -14,7 +14,7 @@ jobs:
       - name: Checkout the subtask_inclusion repo
         uses: actions/checkout@v4
         with:
-          repository: Matistjati/subtask_inclusion_github_action
+          repository: Matistjati/subtask_inclusion_github_action # REPLACE this with your own fork if you don't trust me
           path: subtask_inclusion_repo
 
       - name: Move Python script to root
@@ -26,7 +26,7 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install -r subtask_inclusion_repo/requirements.txt || true
 
-      - name: Disable systemd-coredump and apport
+      - name: Disable systemd-coredump and apport # See # Fragility in README
         run: |
           sudo systemctl mask systemd-coredump.socket systemd-coredump.service || true
           sudo systemctl stop systemd-coredump.socket systemd-coredump.service || true
@@ -35,16 +35,4 @@ jobs:
       - name: Check Subtask Inclusions
           # Add a timeout for safety
         run: |
-          timeout 10m python3 -u check_subtask_inclusion.py
-
-      - name: Upload full log
-        uses: actions/upload-artifact@v4
-        with:
-          name: log
-          path: output/test_group_inclusions.log
-
-      - name: Upload summary markdown
-        uses: actions/upload-artifact@v4
-        with:
-          name: summary-md
-          path: summary.md
+          timeout 10m python3 -u check_subtask_inclusion.py | tee "$GITHUB_STEP_SUMMARY"
