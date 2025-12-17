@@ -36,6 +36,8 @@ target_markdown = args.target_markdown
 
 # Formatting
 OK_STR = "OK"
+OK_NO_STR = "OK:N"
+OK_YES_STR = "OK:Y"
 SKIP_STR = "SKIP"
 MISS_STR = "MISS"
 BAD_STR = "BAD"
@@ -96,7 +98,13 @@ def get_problem_name(problem: Path) -> str:
 
 def validate_problem(problem: Path):
     # Name of the C++ source file
-    cpp_file = problem / "input_validators/validator/validator.cpp"
+    input_validator_path = "input_validators/validator/validator.cpp"
+    cpp_file = problem / input_validator_path
+    if not cpp_file.exists():
+        print_md_newline()
+        warning_text = f'Skipping {get_problem_name(problem)}: no C++ input validator found. Looked at {input_validator_path}'
+        print(f"{h2()}{orange(warning_text)}\n")
+        return
     # Name of the output executable
     output_executable = '/tmp/validator.out'
 
@@ -108,7 +116,7 @@ def validate_problem(problem: Path):
     if compile_process.returncode != 0:
         print(f"{h2()}{red('Validator Compilation Failed:')}")
         print(red(compile_process.stderr))
-        exit(0)
+        return
 
     def run_validator(file, flags, group):
         run_command = [output_executable] + flags.split()
@@ -137,16 +145,9 @@ def validate_problem(problem: Path):
             if file.endswith('.in'):
                 if file not in tc_to_groups:
                     tc_to_groups[file] = []
-
+                group_testcases[group].append(file)
                 tc_to_groups[file].append(group)
                 infiles_path[file] = os.path.join(dirpath,file)
-    
-    for tc, groups in tc_to_groups.items():
-        if "sample" in groups:
-            which_group = "sample"
-        else:
-            which_group = min(groups)
-        group_testcases[which_group].append(tc)
 
     inputs = sorted(tc_to_groups.keys())
     groups = sorted(group_to_flags.keys())
@@ -163,7 +164,7 @@ def validate_problem(problem: Path):
             val = run_validator(infiles_path[file],group_to_flags[g],g)
             inc = 1 if g in tc_to_groups[file] else 0
             if val == inc:
-                return f"{OK_STR}:Y" if val else f"{OK_STR}:N"
+                return f"{OK_YES_STR}" if val else f"{OK_NO_STR}"
             elif val:
                 return MISS_STR
             else:
@@ -223,6 +224,11 @@ def validate_problem(problem: Path):
         if "sample" in groups:
             row_lines.append(format_group("sample", sep=' '))
 
+        def get_group_name(tc):
+            if 'sample' in tc_to_groups[tc]:
+                return 'sample'
+            return min(tc_to_groups[tc])
+
         for r in range(len(data)):
             line = '| ' + ' | '.join(pad(color_cell(data[r][i]), col_widths[i], len(data[r][i])) for i in range(ncols)) + ' |'
             row_lines.append(line)
@@ -231,9 +237,8 @@ def validate_problem(problem: Path):
             if r + 1 < len(data):
                 curr_tc = data[r][0]
                 next_tc = data[r+1][0]
-                if min(tc_to_groups[curr_tc]) != min(tc_to_groups[next_tc]):
-                    group_name = min(tc_to_groups[next_tc])
-                    row_lines.append(format_group(group_name))
+                if get_group_name(curr_tc) != get_group_name(next_tc):
+                    row_lines.append(format_group(get_group_name(next_tc)))
 
         header_line = '| ' + ' | '.join(pad(headers[i], col_widths[i]) for i in range(ncols)) + ' |'
         separator_line = '| ' + ' | '.join('-' * col_widths[i] for i in range(ncols)) + ' |'
@@ -279,21 +284,26 @@ def validate_problem(problem: Path):
             if g2 == "sample":
                 continue
 
-            num_misses = 0
+            include_allowed = True
+            any_miss = False
             for tc in group_testcases[g1]:
-                assert len(data[tc_index[tc]]) == len(groups) + 1
-                if data[tc_index[tc]][g2_ind + 1] == MISS_STR:
-                    num_misses += 1
+                verdict = data[tc_index[tc]][g2_ind + 1]
+                if verdict in (OK_NO_STR, BAD_STR):
+                    include_allowed = False
+                    break
+                if verdict == MISS_STR:
+                    any_miss = True
 
-            if num_misses == len(group_testcases[g1]):
+            if include_allowed and any_miss:
                 missed_inclusions.append(g2)
 
+        warning_string = orange('Missed sample inclusion') if g1 == 'sample' else red('Missed inclusion')
         if not missed_inclusions:
             continue
         elif len(missed_inclusions) == 1:
-            print(f"{red('Missed inclusion')}: {orange(g1, console_only=True)} can be included in {orange(missed_inclusions[0], console_only=True)}")
+            print(f"{warning_string}: {orange(g1, console_only=True)} can be included in {orange(missed_inclusions[0], console_only=True)}")
         else:
-            print(f"{red('Missed inclusion')}: {orange(g1, console_only=True)} can be included in")
+            print(f"{warning_string}: {orange(g1, console_only=True)} can be included in")
             for g2 in missed_inclusions:
                 print(f" - {orange(g2, console_only=True)}")
         print_md_newline()
