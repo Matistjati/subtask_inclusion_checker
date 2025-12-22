@@ -90,7 +90,7 @@ def print_md_newline():
         print("")
 
 def get_problem_name(problem: Path) -> str:
-    problem_name = green(problem.name, console_only=True)
+    problem_name = green(problem.resolve().name, console_only=True)
     parent = problem.parent.name
     if parent != Path(__file__).parent.name and parent:
         problem_name = parent + '/' + problem_name
