@@ -173,6 +173,6 @@ Will check 1 problem.
 
 
 # Fragility
-It's not uncommon for input validators to use assert. This can easily lead to the Github runner being overwhelmed by many Apport
-instances spawning at once (one is created per crashing input validator). I have disabled it, but it's not unreasonable that
-similar issues might present themselves in the future or on other systems.
+It's not uncommon for input validators to use assert.
+This can easily lead to the Github runner being overwhelmed by many Apport instances spawning at once (one is created per crashing input validator).
+I have disabled it, but it's not unreasonable that similar issues might present themselves in the future or on other systems.

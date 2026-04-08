@@ -4,7 +4,6 @@
 # and report any potential testcases which could also be included in additional groups.
 
 import subprocess
-import os
 import yaml
 import concurrent.futures
 import re
@@ -106,7 +105,7 @@ def validate_problem(problem: Path):
         print(f"{h2()}{orange(warning_text)}\n")
         return
     # Name of the output executable
-    output_executable = '/tmp/validator.out'
+    output_executable = f'/tmp/validator_{problem.name}.out'
 
     # Compile the C++ file
     compile_command = ['g++', '-O2', cpp_file, '-o', output_executable, '-std=c++20']
@@ -129,56 +128,99 @@ def validate_problem(problem: Path):
     infiles_path = {}
     group_testcases = {}
 
-    # os.walk generates the file names in a directory tree
-    for dirpath, dirnames, filenames in os.walk(os.path.join(problem,'data')):
-        group = os.path.basename(dirpath)
-        if group not in ("data", "secret"):
-            group_to_flags[group] = ""
-            group_testcases[group] = []
-        if "testdata.yaml" in filenames:
-            with open(os.path.join(dirpath,'testdata.yaml'), 'r') as file:
-                # Load the YAML content
-                config = yaml.safe_load(file)
-                if 'input_validator_flags' in config:
-                    group_to_flags[group] = config['input_validator_flags']
-        for file in filenames:
-            if file.endswith('.in'):
-                if file not in tc_to_groups:
-                    tc_to_groups[file] = []
-                group_testcases[group].append(file)
-                tc_to_groups[file].append(group)
-                infiles_path[file] = os.path.join(dirpath,file)
+    data_dir = problem / 'data'
+    if not data_dir.exists():
+        print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no data\n")
+        return
+
+    if not (data_dir / 'secret').exists():
+        print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no secret data\n")
+        return
+
+    num_subtasks = len(list(p for p in (data_dir / 'secret').iterdir() if p.is_dir()))
+    if num_subtasks == 0:
+        print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no subtasks\n")
+        return
+
+    for in_file in data_dir.rglob('*.in'):
+        group_file = in_file.parent
+        group_name = group_file.name
+        if group_name in ('data', 'secret'):
+            # These test cases do not belong to a group
+            continue
+
+        # First time seeing this group
+        if group_name not in group_to_flags:
+            flags = ""
+            search_dir = group_file.resolve()
+            while True:
+                config_path = search_dir / "testdata.yaml"
+                if config_path.exists():
+                    with open(config_path) as f:
+                        parsed = yaml.safe_load(f)
+                    flag_value = (parsed or {}).get("input_validator_flags")
+                    if flag_value is not None:
+                        flags = flag_value
+                        break
+                if search_dir == data_dir.resolve():
+                    break
+                search_dir = search_dir.parent
+
+            group_to_flags[group_name] = flags
+            group_testcases[group_name] = []
+
+        root_testcase = in_file.resolve()
+        testcase_name = str(root_testcase.relative_to(data_dir.resolve()))
+        if testcase_name not in tc_to_groups:
+            tc_to_groups[testcase_name] = []
+        tc_to_groups[testcase_name].append(group_name)
+        group_testcases[group_name].append(testcase_name)
+        infiles_path[testcase_name] = str(root_testcase)
 
     inputs = sorted(tc_to_groups.keys())
     groups = sorted(group_to_flags.keys())
     if 'sample' in groups:
+        # Ensure sample is always first
         groups.remove('sample')
         groups = ['sample'] + groups
 
-    inputs = sorted(inputs, key=lambda x: (re.match(r'(\d+)\.in', x) is None, x))
+    inputs = sorted(inputs, key=lambda x: (re.search(r'(\d+)\.in$', x) is None, x))
 
     data = []
 
-    def go(file, g):
+    def go(file, group):
         try:
-            val = run_validator(infiles_path[file],group_to_flags[g],g)
-            inc = 1 if g in tc_to_groups[file] else 0
-            if val == inc:
-                return f"{OK_YES_STR}" if val else f"{OK_NO_STR}"
-            elif val:
+            can_be_included = run_validator(infiles_path[file], group_to_flags[group], group)
+            is_included = 1 if group in tc_to_groups[file] else 0
+            if can_be_included == is_included:
+                return OK_YES_STR if can_be_included else OK_NO_STR
+            elif can_be_included:
                 return MISS_STR
             else:
                 return BAD_STR
         except Exception as e:
-            print(f"{red('Exception while validating')} {file} for group {g}: {e}")
+            print(f"{red('Exception while validating')} {file} for group {group}: {e}")
             return "UNKNOWN"
 
-    for file in inputs:
-        #row = [file] + [go(file, g) for g in groups]
+    if 0:
+        # For debugging purposes
+        for file in inputs:
+            row = [file] + [go(file, g) for g in groups]
+            data.append(row)
+    else:
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(go, file, g) for g in groups]
-            row = [file] + [future.result() for future in futures]
-        data.append(row)
+            futures = {
+                (file, group): executor.submit(go, file, group)
+                for file in inputs
+                for group in groups
+            }
+
+            for file in inputs:
+                row = [file]
+                for group in groups:
+                    result = futures[(file, group)].result()
+                    row.append(result)
+                data.append(row)
 
 
     def print_table(data: Iterable[Iterable[Any]], headers: Iterable[Any]) -> str:
@@ -187,13 +229,15 @@ def validate_problem(problem: Path):
         col_widths: List[int] = []
         for col in range(ncols):
             max_width = len(headers[col])
-            for r in data:
-                max_width = max(max_width, len(r[col]))
+            if col == 0:
+                max_width = max(max_width, max((len(Path(r[col]).name) for r in data)))
+            else:
+                max_width = max(max_width, max((len(r[col]) for r in data)))
             col_widths.append(max(3, max_width))
         col_widths[0] = max(col_widths[0], max(len(g) for g in groups))
 
         def pad(text: str, width: int, text_width=None) -> str:
-            if not text_width:
+            if text_width is None:
                 text_width = len(text)
             w = (width - text_width)
             l_half = w//2
@@ -230,7 +274,9 @@ def validate_problem(problem: Path):
             return min(tc_to_groups[tc])
 
         for r in range(len(data)):
-            line = '| ' + ' | '.join(pad(color_cell(data[r][i]), col_widths[i], len(data[r][i])) for i in range(ncols)) + ' |'
+            row = data[r][:]
+            row[0] = Path(data[r][0]).name
+            line = '| ' + ' | '.join(pad(color_cell(row[i]), col_widths[i], len(row[i])) for i in range(ncols)) + ' |'
             row_lines.append(line)
             
             # Insert group names inbetween
@@ -248,11 +294,11 @@ def validate_problem(problem: Path):
 
         return table
 
-    def count_word_occurrences(word, table):
+    def count_verdict_occurrences(verdict, table):
         count = 0
         for row in table:
-            for item in row:
-                if word in item:
+            for item in row[1:]:
+                if verdict in item:
                     count += 1
         return count
 
@@ -263,16 +309,15 @@ def validate_problem(problem: Path):
                 row[groups.index('sample')+1] = SKIP_STR
 
     # Warning/bad summary
-    any_bads = count_word_occurrences(BAD_STR, data)>0
-    any_misses = count_word_occurrences(MISS_STR, data)>0
+    num_bads = count_verdict_occurrences(BAD_STR, data)
+    num_misses = count_verdict_occurrences(MISS_STR, data)
 
-    if any_misses:
-        num_misses = count_word_occurrences(MISS_STR, data)
+    if num_misses > 0:
         p_misses = num_misses / (len(data)*len(groups)) * 100
         print(f"{h3()}{orange('Misses')}: {num_misses}, {p_misses:.2f}% of all checks.\n")
 
-    if any_bads:
-        print(f"{h3()}{red('Bads')}: {count_word_occurrences('BAD', data)}")
+    if num_bads > 0:
+        print(f"{h3()}{red('Bads')}: {num_bads}")
 
     # Subtask inclusion misses
     tc_index = {}
@@ -326,8 +371,7 @@ def discover_problems(root: Path):
     candidates = [p for p in candidates if "testdata_tools" not in str(p)]
     return candidates
 
-directory = args.directory
-problems = discover_problems(directory)
+problems = sorted(discover_problems(args.directory))
 
 num_problems = len(problems)
 plural = '' if num_problems == 1 else 's'
