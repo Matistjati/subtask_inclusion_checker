@@ -96,19 +96,26 @@ def get_problem_name(problem: Path) -> str:
     return problem_name
 
 def validate_problem(problem: Path):
-    # Name of the C++ source file
-    input_validator_path = "input_validators/validator/validator.cpp"
-    cpp_file = problem / input_validator_path
-    if not cpp_file.exists():
+    # Discover the C++ input validator: any .cpp file inside input_validators/<name>/.
+    # Kattis allows the validator entry point to be named anything (e.g. validator.cpp,
+    # input_validator.cpp), so we glob instead of hardcoding the filename.
+    input_validators_dir = problem / "input_validators"
+    cpp_candidates = sorted(input_validators_dir.glob("*/*.cpp")) if input_validators_dir.is_dir() else []
+    if not cpp_candidates:
         print_md_newline()
-        warning_text = f'Skipping {get_problem_name(problem)}: no C++ input validator found. Looked at {input_validator_path}'
+        warning_text = f'Skipping {get_problem_name(problem)}: no C++ input validator found under input_validators/*/'
         print(f"{h2()}{orange(warning_text)}\n")
         return
+
+    # Compile every .cpp in the chosen validator directory so multi-file validators work.
+    validator_dir = cpp_candidates[0].parent
+    cpp_sources = sorted(validator_dir.glob("*.cpp"))
+
     # Name of the output executable
     output_executable = f'/tmp/validator_{problem.name}.out'
 
-    # Compile the C++ file
-    compile_command = ['g++', '-O2', cpp_file, '-o', output_executable, '-std=c++20']
+    # Compile the C++ file(s)
+    compile_command = ['g++', '-O2', *[str(p) for p in cpp_sources], '-o', output_executable, '-std=c++20']
     compile_process = subprocess.run(compile_command, capture_output=True, text=True)
 
     # Check if compilation was successful
