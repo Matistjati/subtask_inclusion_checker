@@ -191,7 +191,12 @@ def validate_problem(problem: Path):
         groups.remove('sample')
         groups = ['sample'] + groups
 
-    inputs = sorted(inputs, key=lambda x: (re.search(r'(\d+)\.in$', x) is None, x))
+    def get_group_name(tc):
+        if 'sample' in tc_to_groups[tc]:
+            return 'sample'
+        return min(tc_to_groups[tc])
+
+    inputs = sorted(inputs, key=lambda x: (groups.index(get_group_name(x)), re.search(r'(\d+)\.in$', x) is None, x))
 
     data = []
 
@@ -274,11 +279,6 @@ def validate_problem(problem: Path):
         row_lines = []
         if "sample" in groups:
             row_lines.append(format_group("sample", sep=' '))
-
-        def get_group_name(tc):
-            if 'sample' in tc_to_groups[tc]:
-                return 'sample'
-            return min(tc_to_groups[tc])
 
         for r in range(len(data)):
             row = data[r][:]
