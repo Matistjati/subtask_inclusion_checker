@@ -148,8 +148,8 @@ def validate_problem(problem: Path):
         print(f"{h2()}{orange(warning_text)}\n")
         return
 
-    plural = '' if len(validators) == 1 else 's'
-    print(gray(f"Using {len(validators)} input validator{plural}: " + ', '.join(name for name, _ in validators)))
+    if len(validators) > 1:
+        print(gray(f"Using {len(validators)} input validators: " + ', '.join(name for name, _ in validators)))
 
     build_dir = tempfile.mkdtemp(prefix=f'validator_{problem.name}_')
     try:
