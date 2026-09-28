@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, List, Any
 import argparse
+import sys
 
 resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
@@ -90,6 +91,28 @@ def h3():
 def print_md_newline():
     if target_markdown:
         print("")
+
+PROGRESS_BAR_WIDTH = 40
+
+def progress_enabled():
+    # Transient bar on stderr; only on an interactive console, never in Markdown output.
+    return not target_markdown and sys.stderr.isatty()
+
+def clear_progress():
+    if progress_enabled():
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
+
+def show_progress(done, total):
+    if not progress_enabled():
+        return
+    filled = PROGRESS_BAR_WIDTH * done // total if total else PROGRESS_BAR_WIDTH
+    bar = '#' * filled + '-' * (PROGRESS_BAR_WIDTH - filled)
+    sys.stderr.write(f"\r[{bar}] {done}/{total}")
+    sys.stderr.flush()
+    if done == total:
+        # Erase the bar so it does not end up between the results
+        clear_progress()
 
 def get_problem_name(problem: Path) -> str:
     problem_name = green(problem.resolve().name, console_only=True)
@@ -261,6 +284,7 @@ def _validate_problem_data(problem: Path, run_validator):
             else:
                 return BAD_STR
         except Exception as e:
+            clear_progress()
             print(f"{red('Exception while validating')} {file} for group {group}: {e}")
             return "UNKNOWN"
 
@@ -276,6 +300,10 @@ def _validate_problem_data(problem: Path, run_validator):
                 for file in inputs
                 for group in groups
             }
+
+            show_progress(0, len(futures))
+            for done, _ in enumerate(concurrent.futures.as_completed(futures.values()), start=1):
+                show_progress(done, len(futures))
 
             for file in inputs:
                 row = [file]
