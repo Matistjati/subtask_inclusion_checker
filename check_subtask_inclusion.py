@@ -181,6 +181,8 @@ def compile_validators(problem: Path):
         if target_markdown:
             messages.append("")
         warning_text = f'Skipping {get_problem_name(problem)}: no C++ input validator found in input_validators/'
+        if (problem / "input_format_validators").is_dir():
+            warning_text += ' (input_format_validators/ is the legacy name and is not supported; rename it to input_validators/)'
         messages.append(f"{h2()}{orange(warning_text)}\n")
         return messages, None, None
 
