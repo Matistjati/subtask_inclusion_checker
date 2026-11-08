@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, List, Any
 import argparse
+import signal
 import sys
 
 resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
@@ -131,10 +132,14 @@ OTHER_LANGUAGE_SUFFIXES = {
 }
 VALIDATION_SCRIPT_SUFFIXES = {'.viva', '.ctd'}
 
-def discover_validators(problem: Path):
+# Validators are compiled in the background while other problems are validated;
+# lowest CPU priority so compiling only uses cores the validation leaves idle.
+NICE_PREFIX = ['nice', '-n', '19'] if shutil.which('nice') else []
+
+def discover_validators(problem: Path, messages: List[str]):
     """Find every C++ input validator of a problem.
 
-    Returns a list of (name, [C++ sources]) sorted by name.
+    Returns a list of (name, [C++ sources]) sorted by name; warnings are appended to messages.
     """
     input_validators_dir = problem / "input_validators"
     if not input_validators_dir.is_dir():
@@ -146,33 +151,41 @@ def discover_validators(problem: Path):
         if entry.is_dir():
             build = entry / 'build'
             if build.is_file() and os.access(build, os.X_OK):
-                print(orange(f"Ignoring validator {rel}/: build scripts are not supported"))
+                messages.append(orange(f"Ignoring validator {rel}/: build scripts are not supported"))
                 continue
             files = sorted(f for f in entry.rglob('*') if f.is_file())
             cpp_sources = [f for f in files if f.suffix in CPP_SUFFIXES]
             if cpp_sources:
                 validators.append((entry.name, cpp_sources))
             elif any(f.suffix in OTHER_LANGUAGE_SUFFIXES for f in files):
-                print(orange(f"Ignoring validator {rel}/: only C++ is supported"))
+                messages.append(orange(f"Ignoring validator {rel}/: only C++ is supported"))
         elif entry.is_file():
             if entry.suffix in CPP_SUFFIXES:
                 validators.append((entry.stem, [entry]))
             elif entry.suffix in VALIDATION_SCRIPT_SUFFIXES:
-                print(orange(f"Ignoring validator {rel}: {entry.suffix} validation scripts are not supported"))
+                messages.append(orange(f"Ignoring validator {rel}: {entry.suffix} validation scripts are not supported"))
             elif entry.suffix in OTHER_LANGUAGE_SUFFIXES:
-                print(orange(f"Ignoring validator {rel}: only C++ is supported"))
+                messages.append(orange(f"Ignoring validator {rel}: only C++ is supported"))
     return validators
 
-def validate_problem(problem: Path):
-    validators = discover_validators(problem)
+def compile_validators(problem: Path):
+    """Discover and compile every C++ input validator of a problem.
+
+    Runs ahead of time in a background thread, so nothing is printed here; output is
+    collected in messages and printed once the problem's turn comes.
+    Returns (messages, build_dir, executables); executables is None if the problem cannot be checked.
+    """
+    messages = []
+    validators = discover_validators(problem, messages)
     if not validators:
-        print_md_newline()
+        if target_markdown:
+            messages.append("")
         warning_text = f'Skipping {get_problem_name(problem)}: no C++ input validator found in input_validators/'
-        print(f"{h2()}{orange(warning_text)}\n")
-        return
+        messages.append(f"{h2()}{orange(warning_text)}\n")
+        return messages, None, None
 
     if len(validators) > 1:
-        print(gray(f"Using {len(validators)} input validators: " + ', '.join(name for name, _ in validators)))
+        messages.append(gray(f"Using {len(validators)} input validators: " + ', '.join(name for name, _ in validators)))
 
     build_dir = tempfile.mkdtemp(prefix=f'validator_{problem.name}_')
     try:
@@ -180,13 +193,25 @@ def validate_problem(problem: Path):
         executables = []
         for name, cpp_sources in validators:
             output_executable = str(Path(build_dir) / f'{name}.out')
-            compile_command = ['g++', '-O2', *[str(p) for p in cpp_sources], '-o', output_executable, '-std=c++20']
+            compile_command = NICE_PREFIX + ['g++', '-O2', *[str(p) for p in cpp_sources], '-o', output_executable, '-std=c++20']
             compile_process = subprocess.run(compile_command, capture_output=True, text=True)
             if compile_process.returncode != 0:
-                print(f"{h2()}{red(f'Validator Compilation Failed ({name}):')}")
-                print(red(compile_process.stderr))
-                return
+                messages.append(f"{h2()}{red(f'Validator Compilation Failed ({name}):')}")
+                messages.append(red(compile_process.stderr))
+                return messages, build_dir, None
             executables.append((name, output_executable))
+    except BaseException:
+        shutil.rmtree(build_dir, ignore_errors=True)
+        raise
+    return messages, build_dir, executables
+
+def validate_problem(problem: Path, compiled):
+    messages, build_dir, executables = compiled
+    try:
+        for message in messages:
+            print(message)
+        if executables is None:
+            return
 
         def run_validator(file, flags, group):
             # Pass only if every validator returns 42.
@@ -200,7 +225,8 @@ def validate_problem(problem: Path):
 
         _validate_problem_data(problem, run_validator)
     finally:
-        shutil.rmtree(build_dir, ignore_errors=True)
+        if build_dir is not None:
+            shutil.rmtree(build_dir, ignore_errors=True)
 
 def _validate_problem_data(problem: Path, run_validator):
     group_to_flags = {}
@@ -301,9 +327,15 @@ def _validate_problem_data(problem: Path, run_validator):
                 for group in groups
             }
 
-            show_progress(0, len(futures))
-            for done, _ in enumerate(concurrent.futures.as_completed(futures.values()), start=1):
-                show_progress(done, len(futures))
+            try:
+                show_progress(0, len(futures))
+                for done, _ in enumerate(concurrent.futures.as_completed(futures.values()), start=1):
+                    show_progress(done, len(futures))
+            except BaseException:
+                # Interrupted: drop the queued checks and wait only for the running ones,
+                # so the validators are not deleted from under them.
+                executor.shutdown(cancel_futures=True)
+                raise
 
             for file in inputs:
                 row = [file]
@@ -461,8 +493,36 @@ problems = sorted(discover_problems(args.directory))
 num_problems = len(problems)
 plural = '' if num_problems == 1 else 's'
 print(f"Will check {num_problems} problem{plural}.")
-i=1
-for problem in problems:
-    print(f"{h2()}Problem {i}/{num_problems}: {get_problem_name(problem)}")
-    validate_problem(problem)
-    i += 1
+# Queue every problem's compilation up front on a pool, and validate each problem as soon as
+# its own validators are built, while the rest keep compiling in the background.
+def interrupt(signum, frame):
+    # Ignore repeated Ctrl-C so the cleanup can finish quietly.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGINT, interrupt)
+try:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as compiler:
+        compiles = [compiler.submit(compile_validators, problem) for problem in problems]
+        done = 0
+        try:
+            for i, problem in enumerate(problems, start=1):
+                print(f"{h2()}Problem {i}/{num_problems}: {get_problem_name(problem)}")
+                compiled = compiles[i - 1].result()
+                done = i
+                validate_problem(problem, compiled)
+        finally:
+            # Interrupted: drop the builds that will never be used.
+            for future in compiles[done:]:
+                if future.cancel():
+                    continue
+                try:
+                    build_dir = future.result()[1]
+                except BaseException:
+                    build_dir = None
+                if build_dir is not None:
+                    shutil.rmtree(build_dir, ignore_errors=True)
+except KeyboardInterrupt:
+    clear_progress()
+    print("Interrupted", file=sys.stderr)
+    sys.exit(130)
