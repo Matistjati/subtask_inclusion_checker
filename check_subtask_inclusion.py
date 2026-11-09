@@ -14,17 +14,35 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, List, Any
 import argparse
+import hashlib
+import json
 import signal
 import sys
+import time
 
-resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
-resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+def raise_soft_limit(limit):
+    # The validators inherit these limits. An unprivileged process may only raise the soft
+    # limit, and only up to the hard limit, which is not always infinite (the stack on macOS).
+    try:
+        _soft, hard = resource.getrlimit(limit)
+        resource.setrlimit(limit, (hard, hard))
+    except (ValueError, OSError):
+        pass
+
+raise_soft_limit(resource.RLIMIT_AS)
+raise_soft_limit(resource.RLIMIT_STACK)
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--target-markdown",
     action="store_true",
     help="Optimize output formatting for Markdown (otherwise console)"
+)
+
+parser.add_argument(
+    "--no-cache",
+    action="store_true",
+    help="Compile every validator from scratch instead of reusing the builds of earlier runs"
 )
 
 parser.add_argument(
@@ -89,10 +107,6 @@ def h3():
         return "### "
     return ""
 
-def print_md_newline():
-    if target_markdown:
-        print("")
-
 PROGRESS_BAR_WIDTH = 40
 
 def progress_enabled():
@@ -115,12 +129,38 @@ def show_progress(done, total):
         # Erase the bar so it does not end up between the results
         clear_progress()
 
-def get_problem_name(problem: Path) -> str:
-    problem_name = green(problem.resolve().name, console_only=True)
+def get_problem_name(problem: Path, colored=True) -> str:
+    problem_name = problem.resolve().name
+    if colored:
+        problem_name = green(problem_name, console_only=True)
     parent = problem.parent.name
     if parent != Path(__file__).parent.name and parent:
         problem_name = parent + '/' + problem_name
     return problem_name
+
+def count_str(count, singular, plural=None):
+    if count == 1:
+        return f"1 {singular}"
+    return f"{count} {plural or singular + 's'}"
+
+def print_summary(results):
+    """Print one line per problem, so the outcome of a long run is visible without scrolling."""
+    if len(results) < 2:
+        # With a single problem, its own report is already the last thing printed
+        return
+    names = [get_problem_name(problem, colored=False) for problem, _ in results]
+    if target_markdown:
+        print("## Summary\n")
+        print("| Problem | Result |")
+        print("| ------- | ------ |")
+        for name, (_, result) in zip(names, results):
+            print(f"| {name} | {result} |")
+        print("")
+    else:
+        print("Summary")
+        width = max(len(name) for name in names)
+        for name, (_, result) in zip(names, results):
+            print(f"  {name.ljust(width)}  {result}")
 
 # Discovery mirrors problemtools' run.find_programs on input_validators
 # Only C++ validators are compiled; everything else problemtools would run is warned about.
@@ -168,12 +208,115 @@ def discover_validators(problem: Path, messages: List[str]):
                 messages.append(orange(f"Ignoring validator {rel}: only C++ is supported"))
     return validators
 
-def compile_validators(problem: Path):
+COMPILE_FLAGS = ['-O2', '-std=c++20']
+
+# Compiling takes far longer than validating, so builds are kept between runs. A build is
+# reused only while every file it was compiled from (headers included) is unchanged.
+CACHE_MAX_AGE = 30 * 24 * 3600
+CACHE_SUFFIXES = ('.out', '.json', '.d')
+
+def open_build_dir():
+    """Returns (directory to compile into, whether to delete it afterwards)."""
+    if not args.no_cache:
+        cache_dir = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'subtask_inclusion_checker'
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Forget the builds that have not been used for a while
+            oldest = time.time() - CACHE_MAX_AGE
+            for entry in cache_dir.iterdir():
+                if entry.name.endswith(CACHE_SUFFIXES) and entry.is_file() and entry.stat().st_mtime < oldest:
+                    entry.unlink(missing_ok=True)
+            return cache_dir, False
+        except OSError:
+            pass
+    return Path(tempfile.mkdtemp(prefix='validators_')), True
+
+def compiler_identity():
+    compiler = shutil.which('g++')
+    if compiler is None:
+        return None
+    compiler = os.path.realpath(compiler)
+    stat = os.stat(compiler)
+    return [compiler, stat.st_size, stat.st_mtime_ns]
+
+COMPILER_IDENTITY = compiler_identity()
+
+def file_hash(path):
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def parse_dependencies(rules: str):
+    """The files named as prerequisites in the Make rules a compiler writes."""
+    dependencies = set()
+    for rule in rules.replace('\\\n', ' ').splitlines():
+        _target, separator, prerequisites = rule.partition(': ')
+        if separator:
+            for path in re.split(r'(?<!\\)\s+', prerequisites.strip()):
+                if path:
+                    dependencies.add(os.path.abspath(path.replace('\\ ', ' ').replace('\\#', '#').replace('$$', '$')))
+    return dependencies
+
+def is_up_to_date(executable: Path, manifest: Path):
+    try:
+        hashes = json.loads(manifest.read_text())
+        return (isinstance(hashes, dict) and len(hashes) > 0 and executable.is_file()
+                and all(file_hash(path) == expected for path, expected in hashes.items()))
+    except (OSError, ValueError):
+        return False
+
+def compile_validator(cpp_sources: List[Path], build_dir: Path):
+    """Compile one validator, or reuse the build of an earlier run.
+
+    Returns (executable, None), or (None, compiler output) if it does not compile.
+    """
+    # Not resolved: includes are looked up next to the source as it is named, symlink or not
+    sources = [os.path.abspath(p) for p in cpp_sources]
+    key = hashlib.sha256(json.dumps([COMPILER_IDENTITY, COMPILE_FLAGS, sources]).encode()).hexdigest()[:32]
+    executable = build_dir / f'{key}.out'
+    manifest = build_dir / f'{key}.json'
+    if is_up_to_date(executable, manifest):
+        for path in (executable, manifest):
+            os.utime(path)
+        return str(executable), None
+
+    # Compile under temporary names; a build only gets its real name once it is complete
+    tmp_executable = build_dir / f'{key}.{os.getpid()}.tmp.out'
+    tmp_manifest = build_dir / f'{key}.{os.getpid()}.tmp.json'
+    tmp_dependencies = build_dir / f'{key}.{os.getpid()}.tmp.d'
+    try:
+        compile_command = NICE_PREFIX + ['g++', *COMPILE_FLAGS, *[str(p) for p in cpp_sources], '-o', str(tmp_executable)]
+        # Have the compiler list the headers it reads. System headers are left out: they change
+        # together with the compiler, which is part of the key. (One dependency file per
+        # compiler run, so a validator of several sources is simply compiled every time.)
+        track_dependencies = len(sources) == 1
+        if track_dependencies:
+            compile_command += ['-MMD', '-MF', str(tmp_dependencies)]
+        compile_process = subprocess.run(compile_command, capture_output=True, text=True)
+        if compile_process.returncode != 0:
+            return None, compile_process.stderr
+
+        manifest.unlink(missing_ok=True)
+        os.replace(tmp_executable, executable)
+        if track_dependencies:
+            try:
+                dependencies = parse_dependencies(tmp_dependencies.read_text()) | set(sources)
+                tmp_manifest.write_text(json.dumps({path: file_hash(path) for path in sorted(dependencies)}))
+                os.replace(tmp_manifest, manifest)
+            except OSError:
+                # Without its dependencies the build cannot be trusted next time; it is still good now
+                pass
+        return str(executable), None
+    finally:
+        for path in (tmp_executable, tmp_manifest, tmp_dependencies):
+            path.unlink(missing_ok=True)
+
+def compile_validators(problem: Path, build_dir: Path):
     """Discover and compile every C++ input validator of a problem.
 
     Runs ahead of time in a background thread, so nothing is printed here; output is
     collected in messages and printed once the problem's turn comes.
-    Returns (messages, build_dir, executables); executables is None if the problem cannot be checked.
+    Returns (messages, executables, failure); if the problem cannot be checked,
+    executables is None and failure is its result for the summary.
     """
     messages = []
     validators = discover_validators(problem, messages)
@@ -184,51 +327,57 @@ def compile_validators(problem: Path):
         if (problem / "input_format_validators").is_dir():
             warning_text += ' (input_format_validators/ is the legacy name and is not supported; rename it to input_validators/)'
         messages.append(f"{h2()}{orange(warning_text)}\n")
-        return messages, None, None
+        return messages, None, orange('skipped: no C++ input validator')
 
     if len(validators) > 1:
         messages.append(gray(f"Using {len(validators)} input validators: " + ', '.join(name for name, _ in validators)))
 
-    build_dir = tempfile.mkdtemp(prefix=f'validator_{problem.name}_')
+    # Compile every validator; all of them must accept an input for it to count as valid.
+    executables = []
+    for name, cpp_sources in validators:
+        executable, error = compile_validator(cpp_sources, build_dir)
+        if executable is None:
+            messages.append(f"{h2()}{red(f'Validator Compilation Failed ({name}):')}")
+            messages.append(red(error))
+            return messages, None, red('validator compilation failed')
+        executables.append(executable)
+    return messages, executables, None
+
+DEVNULL = os.open(os.devnull, os.O_RDWR)
+# A plain dict: os.environ would be converted again for every run
+ENVIRONMENT = dict(os.environ)
+
+def run_executable(executable: str, arguments: List[str], input_path: str) -> int:
+    """Run a program on an input file, discarding its output. Returns its exit code.
+
+    subprocess.run costs about twice as much per run, which adds up over thousands of runs.
+    """
+    input_fd = os.open(input_path, os.O_RDONLY)
     try:
-        # Compile every validator; all of them must accept an input for it to count as valid.
-        executables = []
-        for name, cpp_sources in validators:
-            output_executable = str(Path(build_dir) / f'{name}.out')
-            compile_command = NICE_PREFIX + ['g++', '-O2', *[str(p) for p in cpp_sources], '-o', output_executable, '-std=c++20']
-            compile_process = subprocess.run(compile_command, capture_output=True, text=True)
-            if compile_process.returncode != 0:
-                messages.append(f"{h2()}{red(f'Validator Compilation Failed ({name}):')}")
-                messages.append(red(compile_process.stderr))
-                return messages, build_dir, None
-            executables.append((name, output_executable))
-    except BaseException:
-        shutil.rmtree(build_dir, ignore_errors=True)
-        raise
-    return messages, build_dir, executables
+        pid = os.posix_spawn(executable, [executable, *arguments], ENVIRONMENT, file_actions=[
+            (os.POSIX_SPAWN_DUP2, input_fd, 0),
+            (os.POSIX_SPAWN_DUP2, DEVNULL, 1),
+            (os.POSIX_SPAWN_DUP2, DEVNULL, 2),
+        ])
+    finally:
+        os.close(input_fd)
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
 
 def validate_problem(problem: Path, compiled):
-    messages, build_dir, executables = compiled
-    try:
-        for message in messages:
-            print(message)
-        if executables is None:
-            return
+    """Check one problem and print its report. Returns a one-line result for the summary."""
+    messages, executables, failure = compiled
+    for message in messages:
+        print(message)
+    if executables is None:
+        return failure
 
-        def run_validator(file, flags, group):
-            # Pass only if every validator returns 42.
-            for _name, executable in executables:
-                run_command = [executable] + flags.split()
-                with open(file) as inp:
-                    run_process = subprocess.run(run_command, stdin=inp, capture_output=True, text=True)
-                if run_process.returncode != 42:
-                    return False
-            return True
+    def run_validator(file, flags):
+        # Pass only if every validator returns 42.
+        arguments = flags.split()
+        return all(run_executable(executable, arguments, file) == 42 for executable in executables)
 
-        _validate_problem_data(problem, run_validator)
-    finally:
-        if build_dir is not None:
-            shutil.rmtree(build_dir, ignore_errors=True)
+    return _validate_problem_data(problem, run_validator)
 
 def _validate_problem_data(problem: Path, run_validator):
     group_to_flags = {}
@@ -239,16 +388,16 @@ def _validate_problem_data(problem: Path, run_validator):
     data_dir = problem / 'data'
     if not data_dir.exists():
         print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no data\n")
-        return
+        return orange('skipped: no data')
 
     if not (data_dir / 'secret').exists():
         print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no secret data\n")
-        return
+        return orange('skipped: no secret data')
 
     num_subtasks = len(list(p for p in (data_dir / 'secret').iterdir() if p.is_dir()))
     if num_subtasks == 0:
         print(f"{h2()}{red('skipping')} {get_problem_name(problem)}: no subtasks\n")
-        return
+        return orange('skipped: no subtasks')
 
     for in_file in data_dir.rglob('*.in'):
         group_file = in_file.parent
@@ -268,7 +417,8 @@ def _validate_problem_data(problem: Path, run_validator):
                         parsed = yaml.safe_load(f)
                     flag_value = (parsed or {}).get("input_validator_flags")
                     if flag_value is not None:
-                        flags = flag_value
+                        # YAML parses a bare number (input_validator_flags: 10) as an int
+                        flags = str(flag_value)
                         break
                 if search_dir == data_dir.resolve():
                     break
@@ -301,50 +451,39 @@ def _validate_problem_data(problem: Path, run_validator):
 
     data = []
 
-    def go(file, group):
+    # Groups with the same flags accept the same inputs, so each (input, flags) is validated once.
+    # The largest inputs go first, which keeps the cores evenly loaded until the end.
+    runs = sorted({(file, group_to_flags[group]) for file in inputs for group in groups},
+                  key=lambda run: (-os.path.getsize(infiles_path[run[0]]), run))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
+        futures = {
+            (file, flags): executor.submit(run_validator, infiles_path[file], flags)
+            for file, flags in runs
+        }
+
         try:
-            can_be_included = run_validator(infiles_path[file], group_to_flags[group], group)
-            is_included = 1 if group in tc_to_groups[file] else 0
-            if can_be_included == is_included:
-                return OK_YES_STR if can_be_included else OK_NO_STR
-            elif can_be_included:
-                return MISS_STR
-            else:
-                return BAD_STR
+            show_progress(0, len(futures))
+            for done, _ in enumerate(concurrent.futures.as_completed(futures.values()), start=1):
+                show_progress(done, len(futures))
+        except BaseException:
+            # Interrupted: drop the queued checks and wait only for the running ones
+            executor.shutdown(cancel_futures=True)
+            raise
+
+    def verdict(file, group):
+        try:
+            can_be_included = futures[(file, group_to_flags[group])].result()
         except Exception as e:
-            clear_progress()
             print(f"{red('Exception while validating')} {file} for group {group}: {e}")
             return "UNKNOWN"
+        is_included = group in tc_to_groups[file]
+        if can_be_included == is_included:
+            return OK_YES_STR if can_be_included else OK_NO_STR
+        return MISS_STR if can_be_included else BAD_STR
 
-    if 0:
-        # For debugging purposes
-        for file in inputs:
-            row = [file] + [go(file, g) for g in groups]
-            data.append(row)
-    else:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {
-                (file, group): executor.submit(go, file, group)
-                for file in inputs
-                for group in groups
-            }
-
-            try:
-                show_progress(0, len(futures))
-                for done, _ in enumerate(concurrent.futures.as_completed(futures.values()), start=1):
-                    show_progress(done, len(futures))
-            except BaseException:
-                # Interrupted: drop the queued checks and wait only for the running ones,
-                # so the validators are not deleted from under them.
-                executor.shutdown(cancel_futures=True)
-                raise
-
-            for file in inputs:
-                row = [file]
-                for group in groups:
-                    result = futures[(file, group)].result()
-                    row.append(result)
-                data.append(row)
+    for file in inputs:
+        data.append([file] + [verdict(file, group) for group in groups])
 
 
     def print_table(data: Iterable[Iterable[Any]], headers: Iterable[Any]) -> str:
@@ -409,6 +548,10 @@ def _validate_problem_data(problem: Path, run_validator):
         separator_line = '| ' + ' | '.join('-' * col_widths[i] for i in range(ncols)) + ' |'
 
         lines = [separator_line if not target_markdown else '', header_line, separator_line] + row_lines
+        if not target_markdown and len(lines) > shutil.get_terminal_size().lines:
+            # The table does not fit on the screen: repeat the header below it,
+            # so the columns can be read without scrolling back up.
+            lines += [separator_line, header_line, separator_line]
         table = '\n'.join(lines)
 
         return table
@@ -430,15 +573,19 @@ def _validate_problem_data(problem: Path, run_validator):
     # Warning/bad summary
     num_bads = count_verdict_occurrences(BAD_STR, data)
     num_misses = count_verdict_occurrences(MISS_STR, data)
+    num_unknowns = count_verdict_occurrences("UNKNOWN", data)
 
+    # The report is collected first: on a console it goes below the table, where the output ends.
+    report = []
     if num_misses > 0:
         p_misses = num_misses / (len(data)*len(groups)) * 100
-        print(f"{h3()}{orange('Misses')}: {num_misses}, {p_misses:.2f}% of all checks.\n")
+        report.append(f"{h3()}{orange('Misses')}: {num_misses}, {p_misses:.2f}% of all checks.\n")
 
     if num_bads > 0:
-        print(f"{h3()}{red('Bads')}: {num_bads}")
+        report.append(f"{h3()}{red('Bads')}: {num_bads}")
 
     # Subtask inclusion misses
+    all_missed_inclusions = []
     tc_index = {}
     for i in range(len(data)):
         tc_index[data[i][0]] = i
@@ -465,23 +612,60 @@ def _validate_problem_data(problem: Path, run_validator):
         if not missed_inclusions:
             continue
         elif len(missed_inclusions) == 1:
-            print(f"{warning_string}: {orange(g1, console_only=True)} can be included in {orange(missed_inclusions[0], console_only=True)}")
+            report.append(f"{warning_string}: {orange(g1, console_only=True)} can be included in {orange(missed_inclusions[0], console_only=True)}")
         else:
-            print(f"{warning_string}: {orange(g1, console_only=True)} can be included in")
+            report.append(f"{warning_string}: {orange(g1, console_only=True)} can be included in")
             for g2 in missed_inclusions:
-                print(f" - {orange(g2, console_only=True)}")
-        print_md_newline()
+                report.append(f" - {orange(g2, console_only=True)}")
+        if target_markdown:
+            report.append("")
+        all_missed_inclusions += [(g1, g2) for g2 in missed_inclusions]
 
-    # Table
-    print("")
     headers = ['INPUT'] + groups
     if target_markdown:
+        # The table is collapsed, so the report goes first
+        for line in report:
+            print(line)
+        print("")
         print("<details>\n")
-    print(print_table(data,headers))
-    print_md_newline()
-    if target_markdown:
+        print(print_table(data,headers))
+        print("")
         print("</details>\n")
-    print("")
+        print("")
+    else:
+        # The table can be long, so the report goes last: no scrolling back up to read it
+        print(print_table(data,headers))
+        print("")
+        for line in report:
+            print(line)
+        if report:
+            print("")
+
+    # The result for the summary: short, the details are in the report above
+    def count_testcases(verdict, skip=()):
+        # How many test cases have this verdict in some group's column
+        return sum(1 for row in data
+                   if any(cell == verdict and (row[0], group) not in skip for group, cell in zip(groups, row[1:])))
+
+    num_group_inclusions = sum(1 for g1, _ in all_missed_inclusions if g1 != 'sample')
+    num_sample_inclusions = len(all_missed_inclusions) - num_group_inclusions
+    # Misses that are not part of a whole group that could be included
+    in_missed_inclusion = {(tc, g2) for g1, g2 in all_missed_inclusions for tc in group_testcases[g1]}
+    num_stray = count_testcases(MISS_STR, skip=in_missed_inclusion)
+    num_invalid = count_testcases(BAD_STR)
+
+    result = []
+    if num_group_inclusions > 0:
+        result.append(red(count_str(num_group_inclusions, 'missed inclusion')))
+    if num_sample_inclusions > 0:
+        result.append(orange(count_str(num_sample_inclusions, 'missed sample inclusion')))
+    if num_invalid > 0:
+        result.append(red(count_str(num_invalid, 'invalid test case')))
+    if num_unknowns > 0:
+        result.append(red(count_str(num_unknowns, 'check') + ' could not be run'))
+    if num_stray > 0:
+        result.append(orange(f"{num_stray} of {len(data)} test cases {'fits' if num_stray == 1 else 'fit'} more groups"))
+    return ', '.join(result) if result else green('OK')
 
 def discover_problems(root: Path):
     if root.is_file():
@@ -503,28 +687,25 @@ def interrupt(signum, frame):
     raise KeyboardInterrupt
 
 signal.signal(signal.SIGINT, interrupt)
+build_dir, build_dir_is_temporary = open_build_dir()
 try:
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as compiler:
-        compiles = [compiler.submit(compile_validators, problem) for problem in problems]
-        done = 0
+        compiles = [compiler.submit(compile_validators, problem, build_dir) for problem in problems]
+        results = []
         try:
             for i, problem in enumerate(problems, start=1):
                 print(f"{h2()}Problem {i}/{num_problems}: {get_problem_name(problem)}")
-                compiled = compiles[i - 1].result()
-                done = i
-                validate_problem(problem, compiled)
+                results.append((problem, validate_problem(problem, compiles[i - 1].result())))
+            print_summary(results)
         finally:
-            # Interrupted: drop the builds that will never be used.
-            for future in compiles[done:]:
-                if future.cancel():
-                    continue
-                try:
-                    build_dir = future.result()[1]
-                except BaseException:
-                    build_dir = None
-                if build_dir is not None:
-                    shutil.rmtree(build_dir, ignore_errors=True)
+            # Interrupted: drop the compilations that have not started. Leaving the
+            # block waits for the running ones, so nothing is deleted from under them.
+            for future in compiles:
+                future.cancel()
 except KeyboardInterrupt:
     clear_progress()
     print("Interrupted", file=sys.stderr)
     sys.exit(130)
+finally:
+    if build_dir_is_temporary:
+        shutil.rmtree(build_dir, ignore_errors=True)

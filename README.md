@@ -39,6 +39,10 @@ Which will then run the tool on every problem package in `<directory>`.
 If you're planning on using this, I would strongly recommend you to use an alias.
 If you want to export the results, you can use the command-line option `target-markdown` for output that is optimized for Markdown instead of a console.
 
+Compiling the validators takes most of the time, so the compiled validators are kept in `~/.cache/subtask_inclusion_checker`
+(or `$XDG_CACHE_HOME`) and reused for as long as the validator and the headers it includes are unchanged.
+Builds that have not been used for 30 days are removed. Use `--no-cache` to compile everything from scratch.
+
 If you don't want to worry about remembering to run it manually, you can also install it to run automatically every time you commit to your problem repository.
 To do this, simply create the file `.github/workflows/ci.yaml`, and copy the contents of `ci.yaml` into it.
 It will then trigger on every push.
