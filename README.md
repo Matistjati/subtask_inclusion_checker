@@ -44,8 +44,32 @@ Compiling the validators takes most of the time, so the compiled validators are 
 Builds that have not been used for 30 days are removed. Use `--no-cache` to compile everything from scratch.
 
 If you don't want to worry about remembering to run it manually, you can also install it to run automatically every time you commit to your problem repository.
-To do this, simply create the file `.github/workflows/ci.yaml`, and copy the contents of `ci.yaml` into it.
-It will then trigger on every push.
+To do this, create the file `.github/workflows/subtask_inclusion.yaml` in your problem repository with these contents:
+```yaml
+name: Check Subtask Inclusion
+
+on:
+  push:
+
+# The check only reads the repository
+permissions:
+  contents: read
+
+jobs:
+  check-subtask-inclusion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # Increase this if you have many problems
+
+    steps:
+      - name: Checkout the problems
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false # Don't leave the repository token on disk
+
+      - name: Check subtask inclusions
+        uses: Matistjati/subtask_inclusion_checker@v1
+```
+It will then trigger on every push, and write its report to the summary tab of the run.
 With minimal changes, you could make it such that you receive an email every time someone makes a push with missing subtask inclusions.
 
 I also make a big assumption for correctness: no group includes testcases from a group that comes later in Kattis' lexicographic order.
@@ -56,13 +80,14 @@ then all groups in the cycle are the same and could be merged into a single grou
 First, note that if you run this as part of CI, the script can easily consume lots of compute time (on the order of minutes).
 I am not responsible if the script acts up and uses a lot of compute.
 As a safety measure, I have put in a 10 minute timeout.
-If this is not sufficient, you can increase it in the `ci.yaml` file.
+If this is not sufficient, you can increase `timeout-minutes` in the workflow.
 
-Second, the action has hardcoded to pull the Python script from this repository in order to maximize convenience,
-meaning that if I get hacked, the problems could be exfiltrated.
-If you don't feel comfortable with this security risk (or don't trust me), here are two reasonable alternatives:
-- Fork this repository and modify the action to pull in your fork instead of this repository.
-- Copy the Python file to your own repository and modify the action run it directly, removing the need to pull in anything external at all.
+Second, the workflow above runs whatever the `v1` tag of this repository points to in order to maximize convenience
+(I move the tag when I release fixes), meaning that if I get hacked, the problems could be exfiltrated.
+If you don't feel comfortable with this security risk (or don't trust me), here are some reasonable alternatives:
+- Pin the action to a commit you have looked at, by replacing `@v1` with the full SHA of that commit.
+- Fork this repository and point `uses:` at your fork instead of this repository.
+- Copy the Python file to your own repository and run it directly in a `run:` step, removing the need to pull in anything external at all.
 
 I have taken reasonable security measures such as enabling 2FA, but in no event shall I be liable for any
 damages resulting from running code in this repository.
@@ -81,10 +106,10 @@ This is what you will see in the summary tab of the action in Github.
 
 
 Will check 1 problem.
-## Problem 1/1: online/bergfester
+## Problem 1/1: bergfester
 ### ⚠️Misses: 61, 13.03% of all checks.
 
-❌Missed inclusion: sample can be included in
+⚠️Missed sample inclusion: sample can be included in
  - group4
  - group6
 

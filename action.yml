@@ -1,0 +1,30 @@
+name: Check Subtask Inclusion
+description: Find missing subtask inclusions in Kattis problem packages and write a report to the job summary
+
+inputs:
+  directory:
+    description: Directory to search for problem packages
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        # PyYAML is preinstalled on the GitHub-hosted runners
+        python3 -c 'import yaml' 2>/dev/null || python3 -m pip install -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    - name: Disable systemd-coredump and apport # See "Fragility" in the README
+      shell: bash
+      run: |
+        sudo systemctl mask systemd-coredump.socket systemd-coredump.service || true
+        sudo systemctl stop systemd-coredump.socket systemd-coredump.service || true
+        echo '|/bin/false' | sudo tee /proc/sys/kernel/core_pattern || true
+
+    - name: Check subtask inclusions
+      shell: bash # `shell: bash` runs with pipefail, so a crash is not hidden by tee
+      env:
+        DIRECTORY: ${{ inputs.directory }}
+      run: |
+        python3 -u "$GITHUB_ACTION_PATH/check_subtask_inclusion.py" --target-markdown "$DIRECTORY" | tee -a "$GITHUB_STEP_SUMMARY"
